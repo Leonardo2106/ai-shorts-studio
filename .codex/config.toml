@@ -1,0 +1,46 @@
+# AI Shorts Studio — project-scoped Codex configuration
+# Validated against the OpenAI Codex configuration/subagents documentation on 2026-08-14.
+
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+review_model = "gpt-5.6-sol"
+project_doc_max_bytes = 65536
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 4
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "medium"
+interrupt_message = true
+
+[agents.tech_lead]
+description = "Coordena arquitetura, contratos, decomposição, integração e execução dos roadmaps."
+config_file = "agents/tech-lead.toml"
+
+[agents.security]
+description = "Revisor read-only para segurança de filesystem, subprocessos, secrets, providers, privacidade e exaustão de recursos."
+config_file = "agents/security.toml"
+
+[agents.code_reviewer]
+description = "Revisor read-only de correctness, arquitetura, regressões, typing, performance, portabilidade e cobertura de testes."
+config_file = "agents/code-reviewer.toml"
+
+[agents.backend]
+description = "Implementa FastAPI, SQLite, storage, pipeline de mídia, ffprobe/FFmpeg, Whisper, jobs, providers, visão, scoring e rendering."
+config_file = "agents/backend.toml"
+
+[agents.frontend]
+description = "Implementa React/Vite/TypeScript/Tailwind, fluxos de projeto, mídia, transcript, candidatos, scoring, editor, preview e jobs."
+config_file = "agents/frontend.toml"
+
+[agents.qa]
+description = "Cria e mantém testes unitários, integração e E2E seletivo; valida regressões e comportamento Windows/Linux."
+config_file = "agents/qa.toml"
+
+[agents.explorer]
+description = "Investiga de forma read-only incertezas técnicas e a base de código com buscas direcionadas e spikes curtos."
+config_file = "agents/explorer.toml"
+
+[agents.documentation]
+description = "Mantém documentação de setup, arquitetura, Windows/Linux, providers, Whisper e troubleshooting."
+config_file = "agents/documentation.toml"
