@@ -1,0 +1,6 @@
+{
+  "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "2.500", "bit_rate": "800000"},
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "width": 1280, "height": 720, "avg_frame_rate": "30000/1001", "duration": "2.500"}
+  ]
+}
