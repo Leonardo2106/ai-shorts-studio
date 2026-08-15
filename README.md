@@ -1,233 +1,121 @@
 # AI Shorts Studio
 
-> Bootstrap de arquitetura e desenvolvimento. **O produto ainda não está implementado.**
+Aplicação local-first para importar gravações de tela/webcam, sincronizá-las e gerar uma transcrição local com timestamps. A entrega atual corresponde ao Roadmap 00 (M00-1 a M00-7). IA avançada, visão, scoring, editor 9:16 e render final pertencem ao Roadmap 01/02 e ainda não estão implementados.
 
-AI Shorts Studio é uma aplicação local-first planejada para transformar gravações longas de **tela + webcam** em YouTube Shorts de forma automática e semiautomática. O foco é reduzir o trabalho de reassistir horas de vídeo, sincronizar fontes, transcrever, encontrar bons momentos, montar o layout vertical, legendar e renderizar.
+## O que está implementado
 
-## Problema
+- FastAPI + SQLite para projetos e metadados; arquivos ficam em `storage/projects/<uuid>/`.
+- Importação de mídia com `ffprobe`, incluindo zero, uma ou múltiplas faixas de áudio.
+- Offset manual de webcam, preview no navegador quando o codec é compatível e JobRunner local.
+- Transcrição opcional com `faster-whisper` (CPU suportada), presets e cache por mídia/parâmetros.
+- Frontend React/Vite/TypeScript com testes e fluxo de projeto, mídia, sync e transcript.
 
-Criadores que gravam gameplays, programação, aulas, tutoriais ou reações normalmente precisam localizar manualmente momentos interessantes e depois repetir um pipeline trabalhoso de corte, sync, legenda e composição vertical.
+Não há login, APIs pagas, Redis/Celery, microserviços ou renderização final.
 
-## Solução planejada
+## Requisitos
 
-```text
-Criar projeto
-  ↓
-Importar tela / webcam / áudio
-  ↓
-ffprobe + sincronização
-  ↓
-faster-whisper local
-  ↓
-candidatos locais
-  ↓
-IA externa opcional + visão local
-  ↓
-score explicável + ranking
-  ↓
-revisão do usuário
-  ↓
-editor 9:16
-  ↓
-preview
-  ↓
-render FFmpeg
+- Python 3.12+ e Node.js `^20.19.0` ou `>=22.12.0` (requisito do Vite 8).
+- FFmpeg, incluindo `ffprobe`, disponíveis no `PATH`.
+- Git. GPU não é necessária.
+
+### FFmpeg
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt update && sudo apt install ffmpeg
+ffmpeg -version
+ffprobe -version
 ```
 
-A IA externa melhora a seleção, mas **não deve ser requisito** para abrir, editar ou renderizar um projeto.
+Windows nativo (PowerShell, usando `winget`):
 
-## Status
-
-### Implementado neste bootstrap
-
-- configuração Codex project-scoped;
-- 8 agentes especializados;
-- regras globais em `AGENTS.md`;
-- 3 roadmaps progressivos;
-- arquitetura inicial e estratégia de desenvolvimento documentadas.
-
-### Planejado para o produto
-
-- projetos locais com UUID;
-- import de screen/webcam e múltiplas tracks;
-- ffprobe + sync manual;
-- faster-whisper local;
-- jobs/progresso;
-- candidatos e scoring explicável;
-- OpenAI/Gemini/Groq opcionais;
-- OpenCV/MediaPipe para sinais observáveis;
-- editor vertical 9:16;
-- captions/banner;
-- preview/render FFmpeg;
-- suporte Windows nativo e Linux.
-
-### Futuro
-
-- sincronização automática por waveform se provar valor;
-- PostgreSQL somente se houver necessidade real;
-- análise multimodal externa somente opt-in;
-- autenticação/contas/pagamentos somente se o produto deixar de ser uma ferramenta local gratuita.
-
-## Arquitetura inicial
-
-**Monólito modular local-first**:
-
-```text
-React/Vite UI
-    ↓ HTTP local
-FastAPI
- ├─ Projects + SQLite metadata
- ├─ Media / ffprobe / sync
- ├─ Transcription / faster-whisper
- ├─ Jobs local runner
- ├─ Candidate generation
- ├─ Optional AI provider adapters
- ├─ Vision local
- ├─ Scoring / ranking
- └─ Rendering / FFmpeg
-        ↓
-storage/projects/<uuid>/
+```powershell
+winget install Gyan.FFmpeg.Shared
+ffmpeg -version
+ffprobe -version
 ```
 
-Escolhas principais:
-- SQLite para metadata do MVP;
-- filesystem para vídeos, áudio, cache, previews e renders;
-- JobRunner local substituível;
-- sem Redis/Celery/microserviços no MVP;
-- providers externos atrás de interface comum;
-- segurança de paths e subprocessos desde o início.
+Feche e reabra o terminal após alterar o `PATH`. Alternativamente, defina `AI_SHORTS_FFMPEG_BINARY` e `AI_SHORTS_FFPROBE_BINARY` com o caminho do executável. WSL não substitui a validação do Windows nativo; esta ainda não foi feita fisicamente.
 
-## Stack
+## Configuração e execução
 
-### Backend
-- Python 3.12+
-- FastAPI
-- Pydantic v2 + pydantic-settings
-- SQLAlchemy 2.x ou SQLModel, decisão final no Roadmap 00
-- SQLite
+Copie `.env.example` para `backend/.env` e ajuste apenas caminhos locais. O backend lê esse arquivo ao iniciar a partir de `backend/`; não coloque chaves ou segredos nele.
 
-### Media / IA local
-- FFmpeg + ffprobe
-- faster-whisper
-- OpenCV
-- MediaPipe quando validado
-- NumPy
-- Pillow
+Linux:
 
-### Frontend
-- React
-- Vite
-- TypeScript
-- Tailwind CSS
-- TanStack Query
-- Zustand ou Context API para estado local do editor, conforme necessidade real
-
-### Testes
-- pytest / pytest-asyncio / httpx
-- Vitest / React Testing Library
-- Playwright somente quando E2E realmente agregar valor
-
-### IA externa opcional
-- OpenAI
-- Google Gemini
-- Groq
-
-## Estrutura atual
-
-```text
-ai-shorts-studio/
-├── .codex/
-│   ├── agents/
-│   │   ├── backend.toml
-│   │   ├── code-reviewer.toml
-│   │   ├── documentation.toml
-│   │   ├── explorer.toml
-│   │   ├── frontend.toml
-│   │   ├── qa.toml
-│   │   ├── security.toml
-│   │   └── tech-lead.toml
-│   ├── config.toml
-│   └── README.md
-├── .roadmap/
-│   ├── 00-foundation-media-whisper-roadmap.md
-│   ├── 01-ai-vision-scoring-editor-roadmap.md
-│   └── 02-rendering-quality-release-roadmap.md
-├── AGENTS.md
-└── README.md
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e './backend[dev,whisper]'
+cp .env.example backend/.env
+cd backend && uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-## Estrutura de código planejada
+Em outro terminal:
 
-O Roadmap 00 deve criar a estrutura mínima necessária, provavelmente `backend/` e `frontend/`, sem gerar dezenas de arquivos vazios. Veja `AGENTS.md` para os limites modulares sugeridos.
-
-## Agentes Codex
-
-- **Tech Lead — Sol/High:** arquitetura, contratos, decomposição e integração.
-- **Security — Sol/High:** review read-only de superfícies sensíveis.
-- **Code Reviewer — Sol/High:** review read-only de correctness/arquitetura/regressões.
-- **Backend — Sol/Medium:** implementação backend/media/IA local.
-- **Frontend — Sol/Medium:** implementação da experiência web/editor.
-- **QA — Terra/Medium:** testes e regressão.
-- **Explorer — Terra/Low:** investigação read-only.
-- **Documentation — Luna/Low:** documentação previsível e setup.
-
-Veja `.codex/README.md` para o fluxo de delegação.
-
-## Roadmap
-
-1. **Roadmap 00 — Foundation, Media e Whisper**  
-   Primeira vertical slice: projeto, storage, import, ffprobe, sync manual, job runner e transcrição local.
-
-2. **Roadmap 01 — IA, Visão, Scoring e Editor**  
-   Candidatos, providers opcionais, visão local, score explicável, ranking e editor 9:16.
-
-3. **Roadmap 02 — Rendering, Qualidade e Release**  
-   RenderPlan, FFmpeg, preview/final render, cache/performance, Windows/Linux, security e release.
-
-O Codex só deve executar o roadmap explicitamente solicitado.
-
-## Requisitos de desenvolvimento planejados
-
-Ainda não há aplicação executável. Quando o Roadmap 00 começar, o ambiente deverá exigir aproximadamente:
-
-- Git;
-- Python 3.12+;
-- Node.js LTS compatível com Vite;
-- FFmpeg/ffprobe no PATH ou path configurado;
-- gerenciador Python/Node definido no bootstrap real;
-- GPU **não obrigatória**.
-
-## Windows
-
-Windows nativo é requisito do MVP. WSL pode ser usado por desenvolvedores, mas não substitui validação Windows.
-
-Regras do projeto:
-- usar `pathlib`;
-- evitar scripts exclusivamente Bash;
-- fornecer equivalentes PowerShell quando necessário;
-- testar paths com espaços e Unicode;
-- validar comportamento de subprocess/cancelamento no Windows real.
-
-## Linux
-
-Linux é plataforma de primeira classe para desenvolvimento e execução. Instruções específicas serão adicionadas quando o Roadmap 00 definir os comandos e dependências exatas.
-
-## Docker
-
-Docker/Docker Compose são opcionais. Não serão requisito para usar o MVP local. Podem ser adicionados se simplificarem desenvolvimento/reprodutibilidade sem esconder problemas de suporte nativo.
-
-## Variáveis de ambiente planejadas
-
-O arquivo `.env.example` só deve ser criado quando houver código que consuma essas opções. Possíveis grupos:
-
-```text
-APP_STORAGE_ROOT=
-APP_DATABASE_URL=
-FFMPEG_PATH=
-FFPROBE_PATH=
-
-OPENAI_API_KEY=
-GEMINI_API_KEY=
-GROQ_API_KEY=
+```bash
+cd frontend
+npm ci
+npm run dev -- --host 127.0.0.1
 ```
 
+PowerShell (Windows nativo):
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e '.\backend[dev,whisper]'
+Copy-Item .env.example backend/.env
+Push-Location backend
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Em outro PowerShell:
+
+```powershell
+Set-Location frontend
+npm ci
+npm run dev -- --host 127.0.0.1
+```
+
+Abra `http://127.0.0.1:5173`. O bind de backend e frontend deve permanecer em loopback; use um único worker do backend porque o JobRunner e o SQLite são locais.
+
+## Variáveis de ambiente
+
+Todas usam o prefixo `AI_SHORTS_` e correspondem a campos consumidos por `backend/app/core/settings.py`. As mais comuns são `AI_SHORTS_STORAGE_ROOT`, `AI_SHORTS_DATABASE_PATH`, `AI_SHORTS_FFMPEG_BINARY` e `AI_SHORTS_FFPROBE_BINARY`. Timeouts, limites de upload/duração, `AI_SHORTS_JOB_WORKERS` (fixo em `1`), `AI_SHORTS_MAX_ACTIVE_JOBS`, `AI_SHORTS_CORS_ORIGINS` e `AI_SHORTS_ALLOWED_HOSTS` também podem ser definidos; consulte o arquivo de settings antes de adicionar uma variável. Providers OpenAI/Gemini/Groq ainda não são consumidos e não devem ser configurados.
+
+## Fluxo
+
+Criar projeto → importar screen/webcam → `ffprobe` detecta streams e propriedades → ajustar offset manual → iniciar job de transcrição → consultar progresso → abrir transcript com timestamps. O modelo Whisper pode ser baixado no primeiro uso; isso requer rede e espaço em disco. Testes padrão não dependem de GPU nem de modelo grande.
+
+## Validação local
+
+```bash
+cd backend
+python -m pytest
+python -m ruff check .
+python -m mypy app
+cd ../frontend
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
+
+No PowerShell, use os mesmos comandos após `Set-Location`; `pytest`, `ruff` e `mypy` devem ser invocados no ambiente virtual. `npm ci` requer `frontend/package-lock.json`.
+
+## Troubleshooting
+
+- `ffprobe was not found`: instale FFmpeg e confirme `ffprobe -version`, ou defina `AI_SHORTS_FFPROBE_BINARY`.
+- `FFmpeg was not found` ao transcrever: confirme `ffmpeg -version` e `AI_SHORTS_FFMPEG_BINARY`.
+- `faster-whisper` indisponível: instale `python -m pip install -e './backend[whisper]'`; o modelo pode baixar no primeiro uso.
+- Codec sem preview no browser: a mídia pode estar válida; use um codec suportado pelo navegador ou aguarde uma etapa futura de preview/transcode.
+- Falhas no Windows podem envolver caminhos com espaços, arquivos reparse/symlink e diferenças de multiprocessing; o suporte nativo é requisito, mas ainda precisa de validação física.
+- Verifique espaço livre: uploads, SQLite, cache e modelos ficam no filesystem local.
+
+## Arquitetura resumida
+
+React/Vite → HTTP local → FastAPI → serviços de projetos, mídia, jobs e transcrição → SQLite (metadata) + `storage/projects/<uuid>/` (mídia/cache/transcripts). FFmpeg/ffprobe e faster-whisper são executados localmente; nenhum vídeo é enviado a um provider externo.
+
+Consulte `.roadmap/00-foundation-media-whisper-roadmap.md` para o escopo e os critérios desta etapa. O próximo roadmap não deve ser tratado como concluído.
