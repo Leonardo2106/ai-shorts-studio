@@ -1,6 +1,8 @@
 # ruff: noqa: SIM905 -- the stable code table is easier to audit in canonical Whisper order.
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.db.models import TranscriptionPreset
@@ -73,3 +75,16 @@ class TranscriptDocument(BaseModel):
     engine: str
     model: str
     segments: list[TranscriptSegment]
+
+
+class TranscriptSummary(BaseModel):
+    id: str
+    project_id: str
+    media_id: str
+    language: str | None
+    duration_ms: int
+    created_at: datetime
+
+
+class TranscriptListResponse(BaseModel):
+    items: list[TranscriptSummary]
