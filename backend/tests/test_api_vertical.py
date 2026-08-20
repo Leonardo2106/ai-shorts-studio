@@ -49,7 +49,6 @@ async def test_vertical_project_media_range_sync_job_and_transcript(tmp_path: Pa
         app.state.job_runner.submit_transcription = lambda _job_id: None
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-
             created = await client.post("/api/v1/projects", json={"name": "Vertical"})
             assert created.status_code == 201
             project = created.json()
@@ -80,9 +79,7 @@ async def test_vertical_project_media_range_sync_job_and_transcript(tmp_path: Pa
             assert partial.headers["content-range"] == "bytes 1-6/12"
             assert invalid_range.status_code == 416
 
-            synced = await client.patch(
-                f"/api/v1/projects/{project_id}/sync", json={"webcam_offset_ms": 500}
-            )
+            synced = await client.patch(f"/api/v1/projects/{project_id}/sync", json={"webcam_offset_ms": 500})
             assert synced.status_code == 200
             assert synced.json()["webcam_offset_ms"] == 500
 
@@ -132,6 +129,4 @@ async def test_vertical_project_media_range_sync_job_and_transcript(tmp_path: Pa
                 )
             transcript = await client.get(f"/api/v1/projects/{project_id}/transcripts/{transcript_id}")
             assert transcript.status_code == 200
-            assert transcript.json()["segments"] == [
-                {"start_ms": 0, "end_ms": 1000, "text": "olá", "words": None}
-            ]
+            assert transcript.json()["segments"] == [{"start_ms": 0, "end_ms": 1000, "text": "olá", "words": None}]

@@ -9,7 +9,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.ai.schemas import AIProvider, SemanticAnalysisRequest
+from app.ai.service import PROVIDER_MODELS, PROVIDER_PARAMETERS, SemanticAnalysisService
 from app.api.routes import router
+from app.candidates.schemas import CandidateGenerationRequest
+from app.candidates.service import CandidateService
 from app.core.errors import install_error_handlers
 from app.core.middleware import LocalRequestGuardMiddleware
 from app.core.settings import Settings, get_settings
@@ -20,6 +24,8 @@ from app.media.probe import FFprobeService
 from app.projects.storage import ProjectStorage
 from app.transcription.schemas import WHISPER_LANGUAGE_CODES
 from app.transcription.service import TranscriptionService
+from app.vision.schemas import VisionAnalysisRequest
+from app.vision.service import VisionService
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -58,6 +64,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_active_jobs=configured.max_active_jobs,
             shutdown_timeout_seconds=configured.job_shutdown_timeout_seconds,
         )
+        candidates = CandidateService(storage, session_factory)
+        semantic_analysis = SemanticAnalysisService(configured, session_factory)
+        vision = VisionService(storage, session_factory, timeout_seconds=configured.vision_timeout_seconds)
+        runner.register_handler(
+            "CANDIDATE_GENERATION",
+            lambda project_id, data, progress, cancelled: candidates.generate(
+                project_id, CandidateGenerationRequest.model_validate(data), progress, cancelled
+            ),
+        )
+        runner.register_handler(
+            "SEMANTIC_ANALYSIS",
+            lambda project_id, data, progress, cancelled: semantic_analysis.analyze(
+                project_id, SemanticAnalysisRequest.model_validate(data), progress, cancelled
+            ),
+        )
+        runner.register_handler(
+            "VISION_ANALYSIS",
+            lambda project_id, data, progress, cancelled: vision.analyze(
+                project_id, VisionAnalysisRequest.model_validate(data), progress, cancelled
+            ),
+        )
         runner.reconcile_interrupted()
         app.state.settings = configured
         app.state.storage = storage
@@ -67,6 +94,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.importer = importer
         app.state.job_runner = runner
         app.state.transcription = transcription
+        app.state.candidates = candidates
+        app.state.semantic_analysis = semantic_analysis
+        app.state.vision = vision
         app.state.capabilities = {
             "ffprobe": {"available": prober.available_path() is not None, "version": prober.version()},
             "ffmpeg": {"available": shutil.which(configured.ffmpeg_binary) is not None},
@@ -74,6 +104,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "transcription_presets": ["ECONOMY", "BALANCED", "QUALITY", "MAXIMUM_QUALITY"],
             "transcription_languages": sorted(WHISPER_LANGUAGE_CODES),
             "advanced_options": [],
+            "ai_providers": [
+                {
+                    "provider": provider.value,
+                    "configured": semantic_analysis.configured(provider),
+                    "models": PROVIDER_MODELS[provider],
+                    "parameters": PROVIDER_PARAMETERS[provider],
+                }
+                for provider in AIProvider
+            ],
+            "vision": {"available": vision.is_available(), "analyzer_version": 1},
+            "editor": {"canvas": {"width": 1080, "height": 1920}, "schema_version": 1},
         }
         yield
         runner.shutdown()

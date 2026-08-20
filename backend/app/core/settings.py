@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     ffprobe_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     ffmpeg_timeout_seconds: float = Field(default=900.0, gt=0, le=7200)
     whisper_timeout_seconds: float = Field(default=2 * 60 * 60, ge=30, le=8 * 60 * 60)
+    vision_timeout_seconds: float = Field(default=300.0, ge=1, le=3600)
+    provider_max_response_bytes: int = Field(default=2 * 1024 * 1024, ge=16 * 1024, le=16 * 1024 * 1024)
     max_upload_bytes: int = Field(default=8 * 1024**3, gt=0)
     max_request_bytes: int = Field(default=8 * 1024**3 + 2 * 1024**2, gt=0)
     upload_chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024**2)
@@ -31,6 +33,9 @@ class Settings(BaseSettings):
     job_workers: int = Field(default=1, ge=1, le=1)
     job_shutdown_timeout_seconds: float = Field(default=5.0, ge=0.5, le=30)
     max_active_jobs: int = Field(default=4, ge=1, le=16)
+    openai_api_key: SecretStr | None = None
+    gemini_api_key: SecretStr | None = None
+    groq_api_key: SecretStr | None = None
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"])
     allowed_hosts: list[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1", "[::1]"])
 
@@ -68,6 +73,11 @@ class Settings(BaseSettings):
     def resolved_database_path(self) -> Path:
         candidate = self.database_path or (self.storage_root / "metadata.sqlite3")
         return candidate.resolve()
+
+    def provider_key(self, provider: object) -> str | None:
+        name = str(getattr(provider, "value", provider)).lower()
+        value = getattr(self, f"{name}_api_key", None)
+        return value.get_secret_value() if isinstance(value, SecretStr) else None
 
 
 @lru_cache

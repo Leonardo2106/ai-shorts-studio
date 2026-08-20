@@ -8,13 +8,26 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import Response
 
+from app.ai.schemas import AnalysisEstimate, SemanticAnalysisRequest
 from app.api.dependencies import get_session
+from app.candidates.schemas import CandidateGenerationRequest, CandidateListResponse, CandidateResponse, CandidateUpdate
+from app.candidates.service import candidate_response, rebuild_candidate_excerpt, validate_candidate_range
 from app.core.errors import AppError
-from app.db.models import JobModel, MediaModel, MediaRole, ProjectModel, TranscriptModel
+from app.db.models import (
+    CandidateModel,
+    EditConfigModel,
+    JobModel,
+    MediaModel,
+    MediaRole,
+    ProjectModel,
+    ScoreProfileModel,
+    TranscriptModel,
+)
+from app.editor.schemas import CaptionCue, CaptionCueList, EditConfig, EditConfigResponse, LayoutPreset, preset_config
 from app.jobs.schemas import JobError, JobResponse
 from app.media.importer import safe_original_filename
 from app.media.schemas import MediaResponse, media_response
@@ -26,7 +39,21 @@ from app.projects.schemas import (
 )
 from app.projects.service import get_project, project_response, validate_sync_overlap
 from app.projects.storage import ProjectStorage
-from app.transcription.schemas import TranscriptDocument, TranscriptionRequest
+from app.scoring.schemas import (
+    DEFAULT_RULES,
+    ScoreCandidatesRequest,
+    ScoreProfileCreate,
+    ScoreProfileResponse,
+    ScoreProfilesResponse,
+)
+from app.scoring.service import score_and_rank
+from app.transcription.schemas import (
+    TranscriptDocument,
+    TranscriptionRequest,
+    TranscriptListResponse,
+    TranscriptSummary,
+)
+from app.vision.schemas import VisionAnalysisRequest
 
 router = APIRouter()
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -63,6 +90,14 @@ async def create_project(body: ProjectCreate, request: Request, session: Session
     if not project.name:
         raise AppError("INVALID_PROJECT_NAME", "Project name cannot be blank.", status_code=422)
     session.add(project)
+    session.add(
+        ScoreProfileModel(
+            project_id=project.id,
+            name="Default",
+            is_default=True,
+            rules=[rule.model_dump(mode="json") for rule in DEFAULT_RULES],
+        )
+    )
     try:
         request.app.state.storage.project_dir(project.id, create=True)
         session.commit()
@@ -246,6 +281,19 @@ async def cancel_job(job_id: str, request: Request) -> JobResponse:
     return _job_response(request.app.state.job_runner.cancel(job_id))
 
 
+@router.get("/projects/{project_id}/transcripts", response_model=TranscriptListResponse)
+async def list_transcripts(project_id: str, session: SessionDep) -> TranscriptListResponse:
+    project = get_project(session, project_id)
+    items = session.scalars(
+        select(TranscriptModel)
+        .where(TranscriptModel.project_id == project.id)
+        .order_by(TranscriptModel.created_at.desc())
+    ).all()
+    return TranscriptListResponse(
+        items=[TranscriptSummary.model_validate(item, from_attributes=True) for item in items]
+    )
+
+
 @router.get("/projects/{project_id}/transcripts/{transcript_id}", response_model=TranscriptDocument)
 async def get_transcript(
     project_id: str,
@@ -265,3 +313,328 @@ async def get_transcript(
             return TranscriptDocument.model_validate(json.loads(source.read().decode("utf-8")))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise AppError("TRANSCRIPT_UNAVAILABLE", "Stored transcript is unavailable.", status_code=500) from exc
+
+
+@router.post("/projects/{project_id}/candidate-jobs", response_model=JobResponse, status_code=202)
+async def start_candidate_generation(
+    project_id: str, body: CandidateGenerationRequest, request: Request, session: SessionDep
+) -> JobResponse:
+    project = get_project(session, project_id)
+    transcript = session.get(TranscriptModel, body.transcript_id)
+    if transcript is None or transcript.project_id != project.id:
+        raise AppError("TRANSCRIPT_NOT_FOUND", "Transcript was not found.", status_code=404)
+    job, created = request.app.state.job_runner.create_job(
+        project.id, "CANDIDATE_GENERATION", body.model_dump(mode="json")
+    )
+    if created:
+        request.app.state.job_runner.submit(job.id)
+    return _job_response(job)
+
+
+@router.get("/projects/{project_id}/candidates", response_model=CandidateListResponse)
+async def list_candidates(project_id: str, session: SessionDep) -> CandidateListResponse:
+    project = get_project(session, project_id)
+    items = session.scalars(
+        select(CandidateModel)
+        .where(CandidateModel.project_id == project.id)
+        .order_by(CandidateModel.score.desc(), CandidateModel.start_ms)
+    ).all()
+    return CandidateListResponse(items=[candidate_response(item) for item in items])
+
+
+@router.patch("/projects/{project_id}/candidates/{candidate_id}", response_model=CandidateResponse)
+async def update_candidate(
+    project_id: str, candidate_id: str, body: CandidateUpdate, request: Request, session: SessionDep
+) -> CandidateResponse:
+    project = get_project(session, project_id)
+    candidate = session.get(CandidateModel, candidate_id)
+    if candidate is None or candidate.project_id != project.id:
+        raise AppError("CANDIDATE_NOT_FOUND", "Candidate was not found.", status_code=404)
+    start = body.start_ms if body.start_ms is not None else candidate.start_ms
+    end = body.end_ms if body.end_ms is not None else candidate.end_ms
+    validate_candidate_range(session, project, start, end)
+    range_changed = start != candidate.start_ms or end != candidate.end_ms
+    candidate.start_ms, candidate.end_ms = start, end
+    if range_changed:
+        transcript = session.get(TranscriptModel, candidate.transcript_id)
+        if transcript is None:
+            raise AppError("TRANSCRIPT_NOT_FOUND", "Transcript was not found.", status_code=404)
+        title, reasons, context, signals = rebuild_candidate_excerpt(
+            request.app.state.storage, transcript, project, start, end
+        )
+        candidate.title = title
+        candidate.reasons = reasons
+        candidate.context = context
+        candidate.signals = signals
+        candidate.score = None
+        candidate.score_breakdown = None
+    if body.status is not None:
+        candidate.status = body.status
+    session.commit()
+    session.refresh(candidate)
+    return candidate_response(candidate)
+
+
+@router.post("/projects/{project_id}/semantic-analysis/estimate", response_model=AnalysisEstimate)
+async def estimate_semantic_analysis(
+    project_id: str, body: SemanticAnalysisRequest, session: SessionDep
+) -> AnalysisEstimate:
+    project = get_project(session, project_id)
+    candidates = session.scalars(
+        select(CandidateModel).where(CandidateModel.project_id == project.id, CandidateModel.id.in_(body.candidate_ids))
+    ).all()
+    if len(candidates) != len(set(body.candidate_ids)):
+        raise AppError("CANDIDATE_NOT_FOUND", "One or more candidates were not found.", status_code=404)
+    sizes = [len(str(item.context.get("text", ""))) + 100 for item in candidates]
+    chunks, current = 1, 0
+    for size in sizes:
+        if current and current + size > body.chunk_char_limit:
+            chunks, current = chunks + 1, 0
+        current += size
+    return AnalysisEstimate(chunks=chunks, estimated_input_tokens=(sum(sizes) + 3) // 4, candidates=len(candidates))
+
+
+@router.post("/projects/{project_id}/semantic-analysis-jobs", response_model=JobResponse, status_code=202)
+async def start_semantic_analysis(
+    project_id: str, body: SemanticAnalysisRequest, request: Request, session: SessionDep
+) -> JobResponse:
+    project = get_project(session, project_id)
+    if not body.opt_in_external_processing:
+        raise AppError(
+            "EXTERNAL_AI_OPT_IN_REQUIRED", "Explicit opt-in is required for external processing.", status_code=422
+        )
+    if not request.app.state.semantic_analysis.configured(body.provider):
+        raise AppError("PROVIDER_NOT_CONFIGURED", "Selected provider is not configured.", status_code=409)
+    job, created = request.app.state.job_runner.create_job(
+        project.id, "SEMANTIC_ANALYSIS", body.model_dump(mode="json")
+    )
+    if created:
+        request.app.state.job_runner.submit(job.id)
+    return _job_response(job)
+
+
+@router.post("/projects/{project_id}/vision-jobs", response_model=JobResponse, status_code=202)
+async def start_vision_analysis(
+    project_id: str, body: VisionAnalysisRequest, request: Request, session: SessionDep
+) -> JobResponse:
+    project = get_project(session, project_id)
+    media = session.get(MediaModel, body.media_id)
+    if media is None or media.project_id != project.id:
+        raise AppError("MEDIA_NOT_FOUND", "Media was not found.", status_code=404)
+    job, created = request.app.state.job_runner.create_job(project.id, "VISION_ANALYSIS", body.model_dump(mode="json"))
+    if created:
+        request.app.state.job_runner.submit(job.id)
+    return _job_response(job)
+
+
+def _profile_response(profile: ScoreProfileModel) -> ScoreProfileResponse:
+    return ScoreProfileResponse.model_validate(profile, from_attributes=True)
+
+
+@router.get("/projects/{project_id}/score-profiles", response_model=ScoreProfilesResponse)
+async def list_score_profiles(project_id: str, session: SessionDep) -> ScoreProfilesResponse:
+    project = get_project(session, project_id)
+    items = session.scalars(select(ScoreProfileModel).where(ScoreProfileModel.project_id == project.id)).all()
+    return ScoreProfilesResponse(items=[_profile_response(item) for item in items])
+
+
+@router.post("/projects/{project_id}/score-profiles", response_model=ScoreProfileResponse, status_code=201)
+async def create_score_profile(project_id: str, body: ScoreProfileCreate, session: SessionDep) -> ScoreProfileResponse:
+    project = get_project(session, project_id)
+    profile = ScoreProfileModel(
+        project_id=project.id, name=body.name.strip(), rules=[rule.model_dump(mode="json") for rule in body.rules]
+    )
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return _profile_response(profile)
+
+
+@router.put("/projects/{project_id}/score-profiles/{profile_id}", response_model=ScoreProfileResponse)
+async def update_score_profile(
+    project_id: str, profile_id: str, body: ScoreProfileCreate, session: SessionDep
+) -> ScoreProfileResponse:
+    project = get_project(session, project_id)
+    profile = session.get(ScoreProfileModel, profile_id)
+    if profile is None or profile.project_id != project.id:
+        raise AppError("SCORE_PROFILE_NOT_FOUND", "Score profile was not found.", status_code=404)
+    profile.name = body.name.strip()
+    profile.rules = [rule.model_dump(mode="json") for rule in body.rules]
+    session.commit()
+    session.refresh(profile)
+    return _profile_response(profile)
+
+
+@router.post("/projects/{project_id}/score-profiles/default", response_model=ScoreProfileResponse)
+async def restore_default_score_profile(project_id: str, session: SessionDep) -> ScoreProfileResponse:
+    project = get_project(session, project_id)
+    session.execute(
+        delete(ScoreProfileModel).where(
+            ScoreProfileModel.project_id == project.id, ScoreProfileModel.is_default.is_(True)
+        )
+    )
+    profile = ScoreProfileModel(
+        project_id=project.id,
+        name="Default",
+        is_default=True,
+        rules=[rule.model_dump(mode="json") for rule in DEFAULT_RULES],
+    )
+    session.add(profile)
+    session.commit()
+    session.refresh(profile)
+    return _profile_response(profile)
+
+
+@router.post("/projects/{project_id}/candidates/rank", response_model=CandidateListResponse)
+async def rank_candidates(project_id: str, body: ScoreCandidatesRequest, session: SessionDep) -> CandidateListResponse:
+    project = get_project(session, project_id)
+    transcript = session.get(TranscriptModel, body.transcript_id)
+    if transcript is None or transcript.project_id != project.id:
+        raise AppError("TRANSCRIPT_NOT_FOUND", "Transcript was not found.", status_code=404)
+    items = score_and_rank(
+        session,
+        project.id,
+        body.transcript_id,
+        body.candidate_ids,
+        body.profile_id,
+        body.top_n,
+        body.max_overlap_ratio,
+    )
+    session.commit()
+    return CandidateListResponse(items=[candidate_response(item) for item in items])
+
+
+@router.get("/editor/presets", response_model=dict[LayoutPreset, EditConfig])
+async def editor_presets() -> dict[LayoutPreset, EditConfig]:
+    return {preset: preset_config(preset) for preset in LayoutPreset}
+
+
+def _edit_response(item: EditConfigModel) -> EditConfigResponse:
+    return EditConfigResponse(
+        id=item.id,
+        project_id=item.project_id,
+        candidate_id=item.candidate_id,
+        schema_version=item.schema_version,
+        config=EditConfig.model_validate(item.config),
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+    )
+
+
+@router.get("/projects/{project_id}/candidates/{candidate_id}/edit-config", response_model=EditConfigResponse)
+async def get_edit_config(project_id: str, candidate_id: str, session: SessionDep) -> EditConfigResponse:
+    project = get_project(session, project_id)
+    candidate = session.get(CandidateModel, candidate_id)
+    if candidate is None or candidate.project_id != project.id:
+        raise AppError("CANDIDATE_NOT_FOUND", "Candidate was not found.", status_code=404)
+    item = session.scalar(
+        select(EditConfigModel).where(
+            EditConfigModel.project_id == project.id, EditConfigModel.candidate_id == candidate.id
+        )
+    )
+    if item is None:
+        raise AppError("EDIT_CONFIG_NOT_FOUND", "Edit config was not found.", status_code=404)
+    return _edit_response(item)
+
+
+@router.get("/projects/{project_id}/candidates/{candidate_id}/captions", response_model=CaptionCueList)
+def candidate_captions(project_id: str, candidate_id: str, request: Request, session: SessionDep) -> CaptionCueList:
+    project = get_project(session, project_id)
+    candidate = session.get(CandidateModel, candidate_id)
+    if candidate is None or candidate.project_id != project.id:
+        raise AppError("CANDIDATE_NOT_FOUND", "Candidate was not found.", status_code=404)
+    transcript = session.get(TranscriptModel, candidate.transcript_id)
+    if transcript is None:
+        raise AppError("TRANSCRIPT_NOT_FOUND", "Transcript was not found.", status_code=404)
+    path = request.app.state.storage.project_path(project.id, Path("transcripts") / Path(transcript.relative_path).name)
+    try:
+        if path.stat().st_size > 16 * 1024 * 1024:
+            raise AppError("TRANSCRIPT_TOO_LARGE", "Transcript exceeds the caption read limit.", status_code=413)
+        with request.app.state.storage.open_binary(path) as source:
+            data = source.read(16 * 1024 * 1024 + 1)
+            if len(data) > 16 * 1024 * 1024:
+                raise AppError("TRANSCRIPT_TOO_LARGE", "Transcript exceeds the caption read limit.", status_code=413)
+            document = TranscriptDocument.model_validate(json.loads(data.decode("utf-8")))
+    except AppError:
+        raise
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise AppError("TRANSCRIPT_UNAVAILABLE", "Stored transcript is unavailable.", status_code=500) from exc
+    offset = project.webcam_offset_ms if document.source == MediaRole.WEBCAM.value else 0
+    cues: list[CaptionCue] = []
+    has_words = any(segment.words for segment in document.segments)
+    has_segment_fallback = False
+    for segment in document.segments:
+        if has_words and segment.words:
+            for word in segment.words:
+                start, end = word.start_ms + offset, word.end_ms + offset
+                if end > candidate.start_ms and start < candidate.end_ms:
+                    cues.append(
+                        CaptionCue(
+                            start_ms=max(0, start - candidate.start_ms),
+                            end_ms=min(candidate.end_ms, end) - candidate.start_ms,
+                            text=word.text,
+                            words=[
+                                {
+                                    "start_ms": max(0, start - candidate.start_ms),
+                                    "end_ms": min(candidate.end_ms, end) - candidate.start_ms,
+                                    "text": word.text,
+                                }
+                            ],
+                        )
+                    )
+                    if len(cues) > 10_000:
+                        raise AppError(
+                            "CAPTION_LIMIT_EXCEEDED", "Transcript produces too many caption cues.", status_code=422
+                        )
+        else:
+            has_segment_fallback = True
+            start, end = segment.start_ms + offset, segment.end_ms + offset
+            if end > candidate.start_ms and start < candidate.end_ms:
+                cues.append(
+                    CaptionCue(
+                        start_ms=max(0, start - candidate.start_ms),
+                        end_ms=min(candidate.end_ms, end) - candidate.start_ms,
+                        text=segment.text,
+                    )
+                )
+                if len(cues) > 10_000:
+                    raise AppError(
+                        "CAPTION_LIMIT_EXCEEDED", "Transcript produces too many caption cues.", status_code=422
+                    )
+    timing_source = "WORDS_AND_SEGMENTS" if has_words and has_segment_fallback else "WORDS" if has_words else "SEGMENTS"
+    return CaptionCueList(items=cues, timing_source=timing_source)
+
+
+@router.put("/projects/{project_id}/candidates/{candidate_id}/edit-config", response_model=EditConfigResponse)
+async def save_edit_config(
+    project_id: str, candidate_id: str, body: EditConfig, request: Request, session: SessionDep
+) -> EditConfigResponse:
+    project = get_project(session, project_id)
+    candidate = session.get(CandidateModel, candidate_id)
+    if candidate is None or candidate.project_id != project.id:
+        raise AppError("CANDIDATE_NOT_FOUND", "Candidate was not found.", status_code=404)
+    clip_duration = candidate.end_ms - candidate.start_ms
+    if body.banner.start_ms >= clip_duration or (body.banner.end_ms is not None and body.banner.end_ms > clip_duration):
+        raise AppError("INVALID_BANNER_RANGE", "Banner interval exceeds candidate duration.", status_code=422)
+    if body.banner.image_relative_path is not None:
+        asset_path = request.app.state.storage.project_path(project.id, body.banner.image_relative_path)
+        if not asset_path.is_file():
+            raise AppError("EDITOR_ASSET_NOT_FOUND", "Banner asset was not found in project storage.", status_code=422)
+        try:
+            with request.app.state.storage.open_binary(asset_path):
+                pass
+        except OSError as exc:
+            raise AppError("EDITOR_ASSET_UNAVAILABLE", "Banner asset is unavailable.", status_code=422) from exc
+    item = session.scalar(
+        select(EditConfigModel).where(
+            EditConfigModel.project_id == project.id, EditConfigModel.candidate_id == candidate.id
+        )
+    )
+    if item is None:
+        item = EditConfigModel(project_id=project.id, candidate_id=candidate.id, config={})
+        session.add(item)
+    item.schema_version = body.schema_version
+    item.config = body.model_dump(mode="json")
+    session.commit()
+    session.refresh(item)
+    return _edit_response(item)
