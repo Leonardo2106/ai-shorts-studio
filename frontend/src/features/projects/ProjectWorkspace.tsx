@@ -3,9 +3,11 @@ import { api, errorMessage } from '../../api/client'
 import { StatusMessage } from '../../components/StatusMessage'
 import { MediaCard } from '../media/MediaCard'
 import { TranscriptionPanel } from '../transcription/TranscriptionPanel'
+import { CandidateStudio } from '../candidates/CandidateStudio'
 import { SyncControl } from './SyncControl'
+import type { Capabilities } from '../../types/api'
 
-export function ProjectWorkspace({ projectId, transcriptionAvailable }: { projectId: string; transcriptionAvailable?: boolean }) {
+export function ProjectWorkspace({ projectId, transcriptionAvailable, capabilities }: { projectId: string; transcriptionAvailable?: boolean; capabilities?: Capabilities }) {
   const project = useQuery({ queryKey: ['project', projectId], queryFn: () => api.getProject(projectId) })
   if (project.isPending) return <div className="panel" role="status">Abrindo projeto…</div>
   if (project.isError) return <StatusMessage tone="error">Não foi possível abrir o projeto: {errorMessage(project.error)}</StatusMessage>
@@ -15,5 +17,6 @@ export function ProjectWorkspace({ projectId, transcriptionAvailable }: { projec
     <div className="grid gap-4 xl:grid-cols-2"><MediaCard projectId={projectId} role="SCREEN" media={screen} /><MediaCard projectId={projectId} role="WEBCAM" media={webcam} /></div>
     <SyncControl key={`${projectId}:${project.data.webcam_offset_ms}`} projectId={projectId} initialOffset={project.data.webcam_offset_ms} />
     <TranscriptionPanel projectId={projectId} media={project.data.media ?? []} transcriptionAvailable={transcriptionAvailable} />
+    <CandidateStudio projectId={projectId} media={project.data.media ?? []} capabilities={capabilities} />
   </main>
 }
