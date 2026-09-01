@@ -163,3 +163,26 @@ class EditConfigModel(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class RenderArtifactModel(Base):
+    __tablename__ = "render_artifacts"
+    __table_args__ = (
+        UniqueConstraint("project_id", "relative_path", name="uq_render_artifact_path"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.id", ondelete="CASCADE"), index=True)
+    edit_config_id: Mapped[str] = mapped_column(ForeignKey("edit_configs.id", ondelete="CASCADE"), index=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    quality: Mapped[str] = mapped_column(String(20), nullable=False)
+    dependency_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

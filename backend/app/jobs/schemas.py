@@ -9,6 +9,7 @@ from app.db.models import JobStatus
 class JobError(BaseModel):
     code: str
     message: str
+    details: dict[str, Any] | None = None
 
 
 class JobResponse(BaseModel):
@@ -23,3 +24,7 @@ class JobResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class JobListResponse(BaseModel):
+    items: list[JobResponse]

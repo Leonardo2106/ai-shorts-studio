@@ -75,3 +75,5 @@ class AnalysisEstimate(BaseModel):
     chunks: int
     estimated_input_tokens: int
     candidates: int
+    planned_provider_calls: int
+    max_provider_calls: int

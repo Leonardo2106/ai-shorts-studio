@@ -4,9 +4,9 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, cast
 
-from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -21,14 +21,23 @@ from app.db.models import (
     CandidateModel,
     EditConfigModel,
     JobModel,
+    JobStatus,
     MediaModel,
     MediaRole,
     ProjectModel,
     ScoreProfileModel,
     TranscriptModel,
 )
-from app.editor.schemas import CaptionCue, CaptionCueList, EditConfig, EditConfigResponse, LayoutPreset, preset_config
-from app.jobs.schemas import JobError, JobResponse
+from app.editor.captions import extract_caption_cues
+from app.editor.schemas import (
+    CaptionCueList,
+    EditConfig,
+    EditConfigResponse,
+    LayoutPreset,
+    normalize_legacy_edit_config,
+    preset_config,
+)
+from app.jobs.schemas import JobError, JobListResponse, JobResponse
 from app.media.importer import safe_original_filename
 from app.media.schemas import MediaResponse, media_response
 from app.projects.schemas import (
@@ -57,19 +66,30 @@ from app.vision.schemas import VisionAnalysisRequest
 
 router = APIRouter()
 SessionDep = Annotated[Session, Depends(get_session)]
+JobKindFilter = Literal[
+    "TRANSCRIPTION",
+    "CANDIDATE_GENERATION",
+    "SEMANTIC_ANALYSIS",
+    "VISION_ANALYSIS",
+    "RENDER_PREVIEW",
+    "RENDER_FINAL",
+]
 
 
 def _job_response(job: JobModel) -> JobResponse:
     error = None
     if job.error_code and job.error_message:
-        error = JobError(code=job.error_code, message=job.error_message)
+        details = None
+        if job.result_data and isinstance(job.result_data.get("error_details"), dict):
+            details = job.result_data["error_details"]
+        error = JobError(code=job.error_code, message=job.error_message, details=details)
     return JobResponse(
         id=job.id,
         project_id=job.project_id,
         kind=job.kind,
         status=job.status,
         progress=job.progress,
-        result=job.result_data,
+        result=None if error is not None else job.result_data,
         error=error,
         cancellation_requested=job.cancellation_requested,
         created_at=job.created_at,
@@ -276,6 +296,26 @@ async def get_job(job_id: str, session: SessionDep) -> JobResponse:
     return _job_response(job)
 
 
+@router.get("/projects/{project_id}/jobs", response_model=JobListResponse)
+async def list_project_jobs(
+    project_id: str,
+    session: SessionDep,
+    kind: JobKindFilter | None = None,
+    status: JobStatus | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> JobListResponse:
+    project = get_project(session, project_id)
+    statement = select(JobModel).where(JobModel.project_id == project.id)
+    if kind is not None:
+        statement = statement.where(JobModel.kind == kind)
+    if status is not None:
+        statement = statement.where(JobModel.status == status)
+    jobs = session.scalars(
+        statement.order_by(JobModel.created_at.desc(), JobModel.id.desc()).limit(limit)
+    ).all()
+    return JobListResponse(items=[_job_response(job) for job in jobs])
+
+
 @router.post("/jobs/{job_id}/cancel", response_model=JobResponse)
 async def cancel_job(job_id: str, request: Request) -> JobResponse:
     return _job_response(request.app.state.job_runner.cancel(job_id))
@@ -377,7 +417,7 @@ async def update_candidate(
 
 @router.post("/projects/{project_id}/semantic-analysis/estimate", response_model=AnalysisEstimate)
 async def estimate_semantic_analysis(
-    project_id: str, body: SemanticAnalysisRequest, session: SessionDep
+    project_id: str, body: SemanticAnalysisRequest, request: Request, session: SessionDep
 ) -> AnalysisEstimate:
     project = get_project(session, project_id)
     candidates = session.scalars(
@@ -385,13 +425,7 @@ async def estimate_semantic_analysis(
     ).all()
     if len(candidates) != len(set(body.candidate_ids)):
         raise AppError("CANDIDATE_NOT_FOUND", "One or more candidates were not found.", status_code=404)
-    sizes = [len(str(item.context.get("text", ""))) + 100 for item in candidates]
-    chunks, current = 1, 0
-    for size in sizes:
-        if current and current + size > body.chunk_char_limit:
-            chunks, current = chunks + 1, 0
-        current += size
-    return AnalysisEstimate(chunks=chunks, estimated_input_tokens=(sum(sizes) + 3) // 4, candidates=len(candidates))
+    return cast(AnalysisEstimate, request.app.state.semantic_analysis.estimate(list(candidates), body))
 
 
 @router.post("/projects/{project_id}/semantic-analysis-jobs", response_model=JobResponse, status_code=202)
@@ -403,8 +437,7 @@ async def start_semantic_analysis(
         raise AppError(
             "EXTERNAL_AI_OPT_IN_REQUIRED", "Explicit opt-in is required for external processing.", status_code=422
         )
-    if not request.app.state.semantic_analysis.configured(body.provider):
-        raise AppError("PROVIDER_NOT_CONFIGURED", "Selected provider is not configured.", status_code=409)
+    request.app.state.semantic_analysis.validate_request(body)
     job, created = request.app.state.job_runner.create_job(
         project.id, "SEMANTIC_ANALYSIS", body.model_dump(mode="json")
     )
@@ -510,12 +543,13 @@ async def editor_presets() -> dict[LayoutPreset, EditConfig]:
 
 
 def _edit_response(item: EditConfigModel) -> EditConfigResponse:
+    config = EditConfig.model_validate(item.config)
     return EditConfigResponse(
         id=item.id,
         project_id=item.project_id,
         candidate_id=item.candidate_id,
-        schema_version=item.schema_version,
-        config=EditConfig.model_validate(item.config),
+        schema_version=config.schema_version,
+        config=config,
         created_at=item.created_at,
         updated_at=item.updated_at,
     )
@@ -534,6 +568,14 @@ async def get_edit_config(project_id: str, candidate_id: str, session: SessionDe
     )
     if item is None:
         raise AppError("EDIT_CONFIG_NOT_FOUND", "Edit config was not found.", status_code=404)
+    stored_version = item.config.get("schema_version", 1)
+    normalized, geometry_migrated = normalize_legacy_edit_config(EditConfig.model_validate(item.config))
+    migrated = stored_version != normalized.schema_version or geometry_migrated
+    if migrated:
+        item.schema_version = normalized.schema_version
+        item.config = normalized.model_dump(mode="json")
+        session.commit()
+        session.refresh(item)
     return _edit_response(item)
 
 
@@ -560,48 +602,7 @@ def candidate_captions(project_id: str, candidate_id: str, request: Request, ses
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise AppError("TRANSCRIPT_UNAVAILABLE", "Stored transcript is unavailable.", status_code=500) from exc
     offset = project.webcam_offset_ms if document.source == MediaRole.WEBCAM.value else 0
-    cues: list[CaptionCue] = []
-    has_words = any(segment.words for segment in document.segments)
-    has_segment_fallback = False
-    for segment in document.segments:
-        if has_words and segment.words:
-            for word in segment.words:
-                start, end = word.start_ms + offset, word.end_ms + offset
-                if end > candidate.start_ms and start < candidate.end_ms:
-                    cues.append(
-                        CaptionCue(
-                            start_ms=max(0, start - candidate.start_ms),
-                            end_ms=min(candidate.end_ms, end) - candidate.start_ms,
-                            text=word.text,
-                            words=[
-                                {
-                                    "start_ms": max(0, start - candidate.start_ms),
-                                    "end_ms": min(candidate.end_ms, end) - candidate.start_ms,
-                                    "text": word.text,
-                                }
-                            ],
-                        )
-                    )
-                    if len(cues) > 10_000:
-                        raise AppError(
-                            "CAPTION_LIMIT_EXCEEDED", "Transcript produces too many caption cues.", status_code=422
-                        )
-        else:
-            has_segment_fallback = True
-            start, end = segment.start_ms + offset, segment.end_ms + offset
-            if end > candidate.start_ms and start < candidate.end_ms:
-                cues.append(
-                    CaptionCue(
-                        start_ms=max(0, start - candidate.start_ms),
-                        end_ms=min(candidate.end_ms, end) - candidate.start_ms,
-                        text=segment.text,
-                    )
-                )
-                if len(cues) > 10_000:
-                    raise AppError(
-                        "CAPTION_LIMIT_EXCEEDED", "Transcript produces too many caption cues.", status_code=422
-                    )
-    timing_source = "WORDS_AND_SEGMENTS" if has_words and has_segment_fallback else "WORDS" if has_words else "SEGMENTS"
+    cues, timing_source = extract_caption_cues(document, candidate.start_ms, candidate.end_ms, offset)
     return CaptionCueList(items=cues, timing_source=timing_source)
 
 
@@ -609,6 +610,7 @@ def candidate_captions(project_id: str, candidate_id: str, request: Request, ses
 async def save_edit_config(
     project_id: str, candidate_id: str, body: EditConfig, request: Request, session: SessionDep
 ) -> EditConfigResponse:
+    body, _migrated = normalize_legacy_edit_config(body)
     project = get_project(session, project_id)
     candidate = session.get(CandidateModel, candidate_id)
     if candidate is None or candidate.project_id != project.id:

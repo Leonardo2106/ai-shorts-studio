@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     whisper_timeout_seconds: float = Field(default=2 * 60 * 60, ge=30, le=8 * 60 * 60)
     vision_timeout_seconds: float = Field(default=300.0, ge=1, le=3600)
     provider_max_response_bytes: int = Field(default=2 * 1024 * 1024, ge=16 * 1024, le=16 * 1024 * 1024)
+    provider_job_timeout_seconds: float = Field(default=300.0, ge=30, le=900)
+    provider_max_chunks_per_job: int = Field(default=20, ge=1, le=100)
+    provider_max_calls_per_job: int = Field(default=24, ge=1, le=100)
     max_upload_bytes: int = Field(default=8 * 1024**3, gt=0)
     max_request_bytes: int = Field(default=8 * 1024**3 + 2 * 1024**2, gt=0)
     upload_chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=16 * 1024**2)
@@ -33,6 +36,12 @@ class Settings(BaseSettings):
     job_workers: int = Field(default=1, ge=1, le=1)
     job_shutdown_timeout_seconds: float = Field(default=5.0, ge=0.5, le=30)
     max_active_jobs: int = Field(default=4, ge=1, le=16)
+    max_render_duration_ms: int = Field(default=10 * 60 * 1000, ge=1_000, le=60 * 60 * 1000)
+    max_render_output_bytes: int = Field(default=1024**3, ge=16 * 1024**2, le=16 * 1024**3)
+    max_banner_asset_bytes: int = Field(default=20 * 1024**2, ge=1024, le=100 * 1024**2)
+    render_cancel_grace_seconds: float = Field(default=2.0, ge=0.1, le=30)
+    render_stderr_max_bytes: int = Field(default=64 * 1024, ge=4 * 1024, le=1024 * 1024)
+    max_cached_previews_per_project: int = Field(default=10, ge=1, le=100)
     openai_api_key: SecretStr | None = None
     gemini_api_key: SecretStr | None = None
     groq_api_key: SecretStr | None = None
@@ -77,7 +86,10 @@ class Settings(BaseSettings):
     def provider_key(self, provider: object) -> str | None:
         name = str(getattr(provider, "value", provider)).lower()
         value = getattr(self, f"{name}_api_key", None)
-        return value.get_secret_value() if isinstance(value, SecretStr) else None
+        if not isinstance(value, SecretStr):
+            return None
+        normalized = value.get_secret_value().strip()
+        return normalized or None
 
 
 @lru_cache

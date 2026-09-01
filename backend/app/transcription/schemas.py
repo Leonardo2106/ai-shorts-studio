@@ -41,7 +41,7 @@ class TranscriptionRequest(BaseModel):
 class TranscriptWord(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
-    text: str
+    text: str = Field(max_length=1_000)
 
     @model_validator(mode="after")
     def valid_range(self) -> TranscriptWord:
@@ -53,8 +53,8 @@ class TranscriptWord(BaseModel):
 class TranscriptSegment(BaseModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
-    text: str
-    words: list[TranscriptWord] | None = None
+    text: str = Field(max_length=20_000)
+    words: list[TranscriptWord] | None = Field(default=None, max_length=2_000)
 
     @model_validator(mode="after")
     def valid_range(self) -> TranscriptSegment:
@@ -74,7 +74,7 @@ class TranscriptDocument(BaseModel):
     duration_ms: int
     engine: str
     model: str
-    segments: list[TranscriptSegment]
+    segments: list[TranscriptSegment] = Field(max_length=50_000)
 
 
 class TranscriptSummary(BaseModel):

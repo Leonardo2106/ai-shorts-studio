@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.ai.schemas import AIProvider, SemanticAnalysisRequest
 from app.ai.service import PROVIDER_MODELS, PROVIDER_PARAMETERS, SemanticAnalysisService
+from app.api.rendering_routes import router as rendering_router
 from app.api.routes import router
 from app.candidates.schemas import CandidateGenerationRequest
 from app.candidates.service import CandidateService
@@ -22,6 +24,8 @@ from app.jobs.runner import LocalJobRunner
 from app.media.importer import MediaImporter
 from app.media.probe import FFprobeService
 from app.projects.storage import ProjectStorage
+from app.rendering.renderer import Renderer
+from app.rendering.service import RenderingService
 from app.transcription.schemas import WHISPER_LANGUAGE_CODES
 from app.transcription.service import TranscriptionService
 from app.vision.schemas import VisionAnalysisRequest
@@ -47,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allowed_formats=configured.allowed_media_formats,
         )
         probe_executor = ThreadPoolExecutor(max_workers=configured.probe_workers, thread_name_prefix="ai-shorts-probe")
+        render_plan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-shorts-render-plan")
         importer = MediaImporter(
             storage,
             prober,
@@ -64,6 +69,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_active_jobs=configured.max_active_jobs,
             shutdown_timeout_seconds=configured.job_shutdown_timeout_seconds,
         )
+        renderer = Renderer(configured, storage)
+        renderer.cleanup_orphans()
+        rendering = RenderingService(storage, session_factory, renderer)
         candidates = CandidateService(storage, session_factory)
         semantic_analysis = SemanticAnalysisService(configured, session_factory)
         vision = VisionService(storage, session_factory, timeout_seconds=configured.vision_timeout_seconds)
@@ -85,6 +93,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 project_id, VisionAnalysisRequest.model_validate(data), progress, cancelled
             ),
         )
+        runner.register_handler("RENDER_PREVIEW", rendering.run)
+        runner.register_handler("RENDER_FINAL", rendering.run)
         runner.reconcile_interrupted()
         app.state.settings = configured
         app.state.storage = storage
@@ -92,11 +102,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = session_factory
         app.state.prober = prober
         app.state.importer = importer
+        app.state.render_plan_slots = asyncio.Semaphore(1)
+        app.state.render_plan_executor = render_plan_executor
         app.state.job_runner = runner
         app.state.transcription = transcription
         app.state.candidates = candidates
         app.state.semantic_analysis = semantic_analysis
         app.state.vision = vision
+        app.state.renderer = renderer
+        app.state.rendering = rendering
         app.state.capabilities = {
             "ffprobe": {"available": prober.available_path() is not None, "version": prober.version()},
             "ffmpeg": {"available": shutil.which(configured.ffmpeg_binary) is not None},
@@ -115,10 +129,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ],
             "vision": {"available": vision.is_available(), "analyzer_version": 1},
             "editor": {"canvas": {"width": 1080, "height": 1920}, "schema_version": 1},
+            "rendering": {
+                "available": shutil.which(configured.ffmpeg_binary) is not None
+                and shutil.which(configured.ffprobe_binary) is not None,
+                "preview": True,
+                "final": True,
+                "qualities": ["FAST", "BALANCED", "HIGH"],
+            },
         }
         yield
         runner.shutdown()
         probe_executor.shutdown(wait=False, cancel_futures=True)
+        render_plan_executor.shutdown(wait=True, cancel_futures=True)
         engine.dispose()
 
     app = FastAPI(title=configured.app_name, version="0.1.0", lifespan=lifespan)
@@ -145,6 +167,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(router, prefix=configured.api_prefix)
+    app.include_router(rendering_router, prefix=configured.api_prefix)
     return app
 
 
