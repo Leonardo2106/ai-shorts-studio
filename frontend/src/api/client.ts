@@ -1,4 +1,4 @@
-import type { AiAnalysisInput, AnalysisEstimate, ApiErrorBody, Candidate, CandidateGenerationInput, CandidateUpdate, Capabilities, CaptionCues, EditConfig, EditConfigResponse, Job, MediaAsset, MediaRole, Project, ScoreProfile, ScoreRule, StartTranscription, Transcript, TranscriptSummary, VisionAnalysisInput } from '../types/api'
+import type { AiAnalysisInput, AnalysisEstimate, ApiErrorBody, Candidate, CandidateGenerationInput, CandidateUpdate, Capabilities, CaptionCues, EditConfig, EditConfigResponse, Job, MediaAsset, MediaRole, Project, ProjectJobFilters, RenderArtifact, RenderKind, RenderPlanSummary, RenderQuality, ScoreProfile, ScoreRule, StartTranscription, Transcript, TranscriptSummary, VisionAnalysisInput } from '../types/api'
 
 const API_ROOT = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? '/api/v1'
 
@@ -26,6 +26,7 @@ export const api = {
   uploadMedia: (id: string, role: MediaRole, file: File) => { const body = new FormData(); body.append('role', role); body.append('file', file); return request<MediaAsset>(`/projects/${encodeURIComponent(id)}/media`, { method: 'POST', body }) },
   startTranscription: (id: string, input: StartTranscription) => request<Job>(`/projects/${encodeURIComponent(id)}/transcription-jobs`, { method: 'POST', body: JSON.stringify(input) }),
   getJob: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
+  listProjectJobs: (projectId: string, filters: ProjectJobFilters = {}) => { const query = new URLSearchParams(); if (filters.kind) query.set('kind', filters.kind); if (filters.status) query.set('status', filters.status); if (filters.limit !== undefined) query.set('limit', String(filters.limit)); const suffix = query.size ? `?${query.toString()}` : ''; return request<{ items: Job[] }>(`/projects/${encodeURIComponent(projectId)}/jobs${suffix}`).then((response) => response.items) },
   cancelJob: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   getTranscript: (projectId: string, id: string) => request<Transcript>(`/projects/${encodeURIComponent(projectId)}/transcripts/${encodeURIComponent(id)}`),
   listTranscripts: (projectId: string) => request<{ items: TranscriptSummary[] }>(`/projects/${encodeURIComponent(projectId)}/transcripts`).then((response) => response.items),
@@ -42,7 +43,14 @@ export const api = {
   restoreDefaultScoreProfile: (projectId: string) => request<ScoreProfile>(`/projects/${encodeURIComponent(projectId)}/score-profiles/default`, { method: 'POST' }),
   rankCandidates: (projectId: string, transcriptId: string, candidateIds: string[], profileId: string | null, topN: number, maxOverlapRatio: number) => request<{ items: Candidate[] }>(`/projects/${encodeURIComponent(projectId)}/candidates/rank`, { method: 'POST', body: JSON.stringify({ transcript_id: transcriptId, candidate_ids: candidateIds, profile_id: profileId, top_n: topN, max_overlap_ratio: maxOverlapRatio }) }).then((response) => response.items),
   getCandidateCaptions: (projectId: string, candidateId: string) => request<CaptionCues>(`/projects/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/captions`),
+  getRenderPlan: (projectId: string, candidateId: string, kind: RenderKind, quality: RenderQuality) => request<RenderPlanSummary>(`/projects/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/render-plan?kind=${encodeURIComponent(kind)}&quality=${encodeURIComponent(quality)}`),
+  startPreviewRender: (projectId: string, candidateId: string, quality: RenderQuality) => request<Job>(`/projects/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/preview-jobs`, { method: 'POST', body: JSON.stringify({ quality }) }),
+  startFinalRender: (projectId: string, candidateId: string, quality: RenderQuality) => request<Job>(`/projects/${encodeURIComponent(projectId)}/candidates/${encodeURIComponent(candidateId)}/render-jobs`, { method: 'POST', body: JSON.stringify({ quality }) }),
+  getRenderArtifact: (projectId: string, artifactId: string) => request<RenderArtifact>(`/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}`),
+  listRenderJobs: (projectId: string, candidateId: string, kind: 'RENDER_PREVIEW' | 'RENDER_FINAL') => request<{ items: Job[] }>(`/projects/${encodeURIComponent(projectId)}/render-jobs?candidate_id=${encodeURIComponent(candidateId)}&kind=${encodeURIComponent(kind)}`).then((response) => response.items),
+  listRenderArtifacts: (projectId: string, candidateId?: string, kind?: RenderKind) => { const query = new URLSearchParams(); if (candidateId) query.set('candidate_id', candidateId); if (kind) query.set('kind', kind); const suffix = query.size ? `?${query.toString()}` : ''; return request<{ items: RenderArtifact[] }>(`/projects/${encodeURIComponent(projectId)}/artifacts${suffix}`).then((response) => response.items) },
 }
 
 export function errorMessage(error: unknown): string { return error instanceof Error ? error.message : 'Ocorreu um erro inesperado.' }
 export function mediaContentUrl(path: string): string { if (/^https?:\/\//i.test(path)) return path; const base = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.replace(/\/$/, '') ?? ''; return `${base}${path.startsWith('/') ? '' : '/'}${path}` }
+export function artifactContentUrl(projectId: string, artifactId: string): string { return mediaContentUrl(`${API_ROOT}/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/content`) }

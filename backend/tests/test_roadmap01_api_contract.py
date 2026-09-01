@@ -105,9 +105,69 @@ async def test_roadmap01_api_preserves_editor_intent_and_never_exposes_provider_
             assert provider["configured"] is True
             assert set(provider) == {"provider", "configured", "models", "parameters"}
 
+            estimate = await client.post(
+                f"/api/v1/projects/{project_id}/semantic-analysis/estimate",
+                json={
+                    "provider": "OPENAI",
+                    "model": "gpt-4.1-mini",
+                    "candidate_ids": [candidate_id],
+                    "opt_in_external_processing": True,
+                    "retries": 1,
+                },
+            )
+            assert estimate.status_code == 200
+            assert estimate.json() == {
+                "chunks": 1,
+                "estimated_input_tokens": 29,
+                "candidates": 1,
+                "planned_provider_calls": 2,
+                "max_provider_calls": 24,
+            }
+
             presets = await client.get("/api/v1/editor/presets")
             assert presets.status_code == 200
             assert set(presets.json()) == {item.value for item in LayoutPreset}
+            preset_payloads = presets.json()
+            expected_contract = {
+                "WEBCAM_TOP_SCREEN_BOTTOM": (["WEBCAM", "SCREEN", "CAPTIONS", "BANNER"], "CONTAIN", False),
+                "WEBCAM_TOP_SCREEN_MIDDLE_BANNER_BOTTOM": (
+                    ["WEBCAM", "SCREEN", "CAPTIONS", "BANNER"],
+                    "CONTAIN",
+                    True,
+                ),
+                "SCREEN_FULLSCREEN_WEBCAM_OVERLAY": (
+                    ["SCREEN", "WEBCAM", "CAPTIONS", "BANNER"],
+                    "COVER",
+                    False,
+                ),
+                "WEBCAM_FULLSCREEN_SCREEN_PIP": (
+                    ["WEBCAM", "SCREEN", "CAPTIONS", "BANNER"],
+                    "CONTAIN",
+                    False,
+                ),
+            }
+            for preset_id, (element_order, screen_fit, banner_enabled) in expected_contract.items():
+                config = preset_payloads[preset_id]
+                assert [item["kind"] for item in config["elements"]] == element_order
+                screen_element = next(item for item in config["elements"] if item["kind"] == "SCREEN")
+                assert screen_element["fit"] == screen_fit
+                assert all(
+                    (item["radius"], item["padding"], item["zoom"], item["focal_x"], item["focal_y"])
+                    == (0, 0, 1.0, 0.5, 0.5)
+                    for item in config["elements"]
+                )
+                assert config["background_color"] == "#080C14"
+                assert config["banner"] == {
+                    "enabled": banner_enabled,
+                    "text": "Seu título aqui",
+                    "image_relative_path": None,
+                    "background_color": "#0F172A",
+                    "opacity": 0.9,
+                    "start_ms": 0,
+                    "end_ms": None,
+                }
+                assert config["captions"]["font_family"] == "Arial"
+                assert config["captions"]["outline_color"] == "#000000"
 
             payload = preset_config(LayoutPreset.WEBCAM_TOP_SCREEN_BOTTOM).model_dump(mode="json")
             payload["filtergraph"] = "[0:v]unsafe-command"

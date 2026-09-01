@@ -129,6 +129,8 @@ class LocalJobRunner:
             project_id = job.project_id
             kind = job.kind
             request_data = dict(job.request_data)
+            if kind in {"RENDER_PREVIEW", "RENDER_FINAL"}:
+                request_data["_job_id"] = job_id
         try:
             handler = self._handlers.get(kind)
             if handler is None:
@@ -150,6 +152,7 @@ class LocalJobRunner:
                 job.status = JobStatus.CANCELLED if cancelled else JobStatus.FAILED
                 job.error_code = None if cancelled else exc.code
                 job.error_message = None if cancelled else exc.message
+                job.result_data = None if cancelled or not exc.details else {"error_details": exc.details}
                 job.finished_at = utcnow()
             return
         except Exception:
@@ -164,12 +167,12 @@ class LocalJobRunner:
         with self.session_factory.begin() as session:
             job = session.get(JobModel, job_id)
             if job is not None:
-                if job.cancellation_requested:
-                    job.status = JobStatus.CANCELLED
-                else:
-                    job.status = JobStatus.COMPLETED
-                    job.progress = 1.0
-                    job.result_data = result
+                # Once the handler has durably returned success, a racing cancel request is too late.
+                # Cooperative handlers still observe cancellation and raise JOB_CANCELLED before this point.
+                job.status = JobStatus.COMPLETED
+                job.cancellation_requested = False
+                job.progress = 1.0
+                job.result_data = result
                 job.finished_at = utcnow()
 
     # Kept for compatibility with Roadmap 00 integrations that invoke the focused worker directly.

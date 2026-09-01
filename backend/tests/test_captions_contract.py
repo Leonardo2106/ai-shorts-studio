@@ -9,7 +9,56 @@ from starlette.requests import Request
 from app.api.routes import candidate_captions
 from app.db.models import CandidateModel, MediaModel, MediaRole, ProjectModel, TranscriptModel
 from app.db.session import build_engine, build_session_factory, initialize_database
+from app.editor.captions import extract_caption_cues
 from app.projects.storage import ProjectStorage
+from app.transcription.schemas import TranscriptDocument
+
+
+def test_caption_extraction_clips_words_and_segment_fallback_to_candidate_timeline() -> None:
+    document = TranscriptDocument.model_validate(
+        {
+            "id": "transcript",
+            "project_id": "project",
+            "media_id": "media",
+            "source": "WEBCAM",
+            "audio_stream_index": 1,
+            "language": "pt",
+            "duration_ms": 5_000,
+            "engine": "fixture",
+            "model": "fixture",
+            "segments": [
+                {
+                    "start_ms": 0,
+                    "end_ms": 2_000,
+                    "text": "first second",
+                    "words": [
+                        {"start_ms": 0, "end_ms": 1_200, "text": "first"},
+                        {"start_ms": 1_200, "end_ms": 2_000, "text": "second"},
+                    ],
+                },
+                {"start_ms": 2_000, "end_ms": 4_000, "text": "fallback"},
+            ],
+        }
+    )
+
+    cues, timing_source = extract_caption_cues(document, 1_000, 3_000, 200)
+
+    assert timing_source == "WORDS_AND_SEGMENTS"
+    assert [cue.model_dump() for cue in cues] == [
+        {
+            "start_ms": 0,
+            "end_ms": 400,
+            "text": "first",
+            "words": [{"start_ms": 0, "end_ms": 400, "text": "first"}],
+        },
+        {
+            "start_ms": 400,
+            "end_ms": 1_200,
+            "text": "second",
+            "words": [{"start_ms": 400, "end_ms": 1_200, "text": "second"}],
+        },
+        {"start_ms": 1_200, "end_ms": 2_000, "text": "fallback", "words": None},
+    ]
 
 
 def test_captions_fall_back_per_segment_when_only_part_of_transcript_has_words(tmp_path: Path) -> None:
