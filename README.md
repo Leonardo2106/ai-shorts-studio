@@ -2,6 +2,13 @@
 
 Aplicação local-first para transformar gravações de tela/webcam em Shorts editáveis. O MVP usa FastAPI, React/Vite, SQLite, filesystem e FFmpeg; não exige conta, cloud ou API paga.
 
+![Beta](https://img.shields.io/badge/status-public%20beta-orange)
+![Python](https://img.shields.io/badge/Python-3.12+-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.141+-009688)
+![React](https://img.shields.io/badge/React-18-61DAFB)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6)
+![FFmpeg](https://img.shields.io/badge/FFmpeg-required-007808)
+
 ## Status
 
 - ✅ **Implementado:** projetos, importação e `ffprobe`; sync manual; transcrição opcional com `faster-whisper`; candidatos, análise opcional, visão OpenCV, scoring/ranking; editor `EditConfig` 9:16; `RenderPlan`; preview/render FFmpeg com jobs, progresso, cancelamento, validação e cache.
